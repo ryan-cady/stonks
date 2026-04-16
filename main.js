@@ -733,7 +733,7 @@ function buildCard(symbol, data) {
     if (data.error) {
         return `<div class="stock-card error-card" id="card-${symbol}">
             <div class="card-top">
-                <div class="card-ticker"><a class="ticker-symbol" href="https://finance.yahoo.com/quote/${escHtml(symbol)}" target="_blank" rel="noopener">${escHtml(symbol)}</a></div>
+                <div class="card-ticker"><a class="ticker-symbol" href="https://robinhood.com/stocks/${escHtml(symbol)}" target="_blank" rel="noopener">${escHtml(symbol)}</a></div>
                 <button class="remove-btn" data-sym="${escHtml(symbol)}" title="Remove">✕</button>
             </div>
             <div class="card-error-msg">
@@ -792,7 +792,7 @@ function buildCard(symbol, data) {
     <div class="stock-card score-${scoreTier}${isTracked ? ' is-tracked' : ''}" id="card-${symbol}">
         <div class="card-top">
             <div class="card-ticker">
-                <a class="ticker-symbol" href="https://finance.yahoo.com/quote/${escHtml(symbol)}" target="_blank" rel="noopener">${escHtml(symbol)}</a>
+                <a class="ticker-symbol" href="https://robinhood.com/stocks/${escHtml(symbol)}" target="_blank" rel="noopener">${escHtml(symbol)}</a>
                 <span class="ticker-name" title="${escHtml(name)}">${escHtml(name)}</span>
                 ${trackedBadge}${sourceBadge}
             </div>
