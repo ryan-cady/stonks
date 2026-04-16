@@ -60,6 +60,18 @@
             </div>
             <p id="settings-status" class="settings-status"></p>
         </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-field">
+            <label>Import Robinhood Holdings</label>
+            <p class="settings-hint">In Robinhood: Account → Statements &amp; History → Export. Import the <strong>stocks CSV</strong> to auto-populate your portfolio with buy prices and share counts.</p>
+            <div class="settings-input-row">
+                <button id="rh-import-btn" class="btn btn-secondary">Choose CSV file</button>
+                <input type="file" id="rh-import-file" accept=".csv" style="display:none">
+            </div>
+            <p id="rh-import-status" class="settings-status"></p>
+        </div>
     </div>
 </div>
 

@@ -171,7 +171,30 @@ header {
 .settings-status { font-size: 11px; color: var(--text-muted); }
 .settings-status.ok { color: var(--green); }
 
+.settings-divider {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 16px 0;
+    max-width: 520px;
+}
+
 .analyst-key-link { color: var(--accent); text-decoration: underline; cursor: pointer; }
+
+/* ── Robinhood Popularity ───────────────────────────────────────── */
+.rh-pop-section {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    padding: 7px 12px;
+    margin-bottom: 12px;
+    font-size: 11px;
+}
+.rh-pop-icon { color: var(--text-muted); display: flex; align-items: center; }
+.rh-pop-label { color: var(--text-muted); flex: 1; }
+.rh-pop-count { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--accent); }
 
 /* ── Screener Bar ──────────────────────────────────────────────── */
 .screener-bar {

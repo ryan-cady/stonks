@@ -26,6 +26,8 @@ const CUSTOM_KEY    = 'rebound-radar-custom';
 const FINNHUB_KEY        = 'rebound-radar-finnhub';
 const ANALYST_CACHE_KEY  = 'rebound-radar-analyst-cache';
 const ANALYST_TTL_MS     = 24 * 60 * 60 * 1000; // 24 hours
+const RH_POP_CACHE_KEY   = 'rebound-radar-rh-pop';
+const RH_POP_TTL_MS      = 6 * 60 * 60 * 1000;  // 6 hours
 const PORTFOLIO_KEY = 'rebound-radar-portfolio';
 const FIRED_KEY     = 'rebound-radar-fired';
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
@@ -104,6 +106,21 @@ function bindUI() {
     });
     if (finnhubKey) document.getElementById('finnhub-key').value = finnhubKey;
     updateSettingsStatus();
+
+    // Robinhood CSV import
+    const rhBtn  = document.getElementById('rh-import-btn');
+    const rhFile = document.getElementById('rh-import-file');
+    if (rhBtn && rhFile) {
+        rhBtn.addEventListener('click', () => rhFile.click());
+        rhFile.addEventListener('change', e => {
+            const f = e.target.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = ev => handleRhImport(ev.target.result);
+            reader.readAsText(f);
+            rhFile.value = '';
+        });
+    }
 }
 
 // ── Screener ──────────────────────────────────────────────────────────────────
@@ -249,6 +266,14 @@ async function loadOne(symbol) {
             }
         });
 
+        // Fetch Robinhood popularity independently
+        fetchRhPopularity(symbol).then(pop => {
+            if (stockMap[symbol]?.price) {
+                stockMap[symbol].rhPopularity = pop;
+                updateCardInPlace(symbol);
+            }
+        });
+
         return data;
     } catch (err) {
         stockMap[symbol] = { error: err.message, symbol };
@@ -306,7 +331,8 @@ async function fetchStockData(symbol) {
         low52w, high52w, distFromLow, pctFromLow,
         rsi, avgVolume, curVolume, volRatio,
         score, signals, stabilizing,
-        analyst: null, // populated separately by fetchAnalystData
+        analyst: null,      // populated separately by fetchAnalystData
+        rhPopularity: null, // populated separately by fetchRhPopularity
     };
 }
 
@@ -850,6 +876,7 @@ function buildCard(symbol, data) {
         ${badgeHTML ? `<div class="signals">${badgeHTML}</div>` : ''}
 
         ${buildAnalystHTML(data.analyst)}
+        ${buildRhPopHTML(data.rhPopularity)}
 
         <div class="card-footer">
             <span class="vol-info">
@@ -924,6 +951,155 @@ async function fetchAnalystData(symbol) {
         console.warn(`[analyst] Finnhub failed for ${symbol}:`, err);
         return { unavailable: true };
     }
+}
+
+// ── Robinhood Popularity ──────────────────────────────────────────────────────
+
+function loadRhPopCache() {
+    try { return JSON.parse(localStorage.getItem(RH_POP_CACHE_KEY) || '{}'); } catch (_) { return {}; }
+}
+function saveRhPopCache(cache) {
+    try { localStorage.setItem(RH_POP_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
+}
+
+async function fetchRhPopularity(symbol) {
+    const cache  = loadRhPopCache();
+    const cached = cache[symbol];
+    if (cached && (Date.now() - cached.ts) < RH_POP_TTL_MS) return cached.data;
+
+    try {
+        const instrUrl  = `https://api.robinhood.com/instruments/?symbol=${encodeURIComponent(symbol)}`;
+        const instrResp = await fetch(CORS_PROXY + encodeURIComponent(instrUrl), {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!instrResp.ok) return null;
+        const instrJson = await instrResp.json();
+        const id = instrJson?.results?.[0]?.id;
+        if (!id) return null;
+
+        const popUrl  = `https://api.robinhood.com/popularity/?ids=${id}`;
+        const popResp = await fetch(CORS_PROXY + encodeURIComponent(popUrl), {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!popResp.ok) return null;
+        const popJson = await popResp.json();
+        const holders = popJson?.results?.[0]?.num_open_positions;
+        if (holders == null) return null;
+
+        const result = { holders };
+        cache[symbol] = { data: result, ts: Date.now() };
+        saveRhPopCache(cache);
+        return result;
+    } catch (_) {
+        return null;
+    }
+}
+
+function buildRhPopHTML(pop) {
+    if (!pop) return '';
+    return `
+    <div class="rh-pop-section">
+        <span class="rh-pop-icon">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+        </span>
+        <span class="rh-pop-label">Robinhood holders</span>
+        <span class="rh-pop-count">${formatVolume(pop.holders)}</span>
+    </div>`;
+}
+
+// ── Robinhood CSV Import ──────────────────────────────────────────────────────
+
+function handleRhImport(csvText) {
+    const lines = csvText.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) {
+        showToast('Import failed', 'CSV appears to be empty', 'info');
+        return;
+    }
+
+    const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
+
+    const symCol    = findCol(headers, ['symbol', 'ticker']);
+    const priceCol  = findCol(headers, ['average buy price', 'average_buy_price', 'avg buy price',
+                                        'avg_buy_price', 'buy price', 'average cost', 'cost basis per share']);
+    const sharesCol = findCol(headers, ['quantity', 'shares', 'num shares', 'amount']);
+
+    if (symCol === -1) {
+        showToast('Import failed', 'Could not find a symbol/ticker column', 'info');
+        return;
+    }
+
+    let imported = 0, skipped = 0;
+
+    for (let i = 1; i < lines.length; i++) {
+        const cols = parseCSVLine(lines[i]);
+        const sym  = cols[symCol]?.trim().toUpperCase().replace(/['"]/g, '');
+        if (!sym || !/^[A-Z.]{1,5}$/.test(sym)) { skipped++; continue; }
+
+        const buyPrice = priceCol  !== -1 ? parseFloat(cols[priceCol])  : null;
+        const shares   = sharesCol !== -1 ? parseFloat(cols[sharesCol]) : null;
+
+        if (!customTickers.includes(sym)) customTickers.push(sym);
+        if (!tickers.includes(sym))       tickers.push(sym);
+
+        if (buyPrice && buyPrice > 0) {
+            const existing = portfolio[sym] || {};
+            portfolio[sym] = {
+                ...existing,
+                buyPrice,
+                shares:        (shares > 0 ? shares : null) ?? existing.shares ?? null,
+                buyDate:       existing.buyDate || new Date().toISOString().slice(0, 10),
+                rsiWasOversold: existing.rsiWasOversold ?? false,
+                alertRSI:      existing.alertRSI ?? false,
+                alert52W:      existing.alert52W ?? false,
+            };
+        }
+        imported++;
+    }
+
+    saveCustomTickers();
+    savePortfolio();
+
+    const statusEl = document.getElementById('rh-import-status');
+    if (statusEl) {
+        statusEl.textContent = `Imported ${imported} position${imported !== 1 ? 's' : ''}${skipped ? `, skipped ${skipped} rows` : ''}`;
+        statusEl.className = 'settings-status ok';
+    }
+
+    showToast(`Imported ${imported} positions`, 'Loading stock data…', 'success');
+    loadAll(true);
+    startAutoRefresh();
+}
+
+function findCol(headers, names) {
+    for (const name of names) {
+        const idx = headers.indexOf(name);
+        if (idx !== -1) return idx;
+    }
+    for (const name of names) {
+        const idx = headers.findIndex(h => h.includes(name));
+        if (idx !== -1) return idx;
+    }
+    return -1;
+}
+
+function parseCSVLine(line) {
+    const result = [];
+    let cur = '', inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+            inQuote = !inQuote;
+        } else if (ch === ',' && !inQuote) {
+            result.push(cur); cur = '';
+        } else {
+            cur += ch;
+        }
+    }
+    result.push(cur);
+    return result;
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
