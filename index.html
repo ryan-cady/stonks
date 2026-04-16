@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rebound Radar — 52-Week Low Tracker</title>
+    <link rel="stylesheet" href="main.css">
+</head>
+<body>
+
+<!-- ── Header ─────────────────────────────────────────────────── -->
+<header>
+    <div class="header-content">
+        <div class="logo">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                <path d="M4 24 L10 16 L16 20 L22 10 L28 6" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="28" cy="6" r="3" fill="#10b981"/>
+            </svg>
+            <div>
+                <h1>Rebound Radar</h1>
+                <p>52-week lows with recovery potential</p>
+            </div>
+        </div>
+        <div class="header-actions">
+            <div class="add-ticker">
+                <input type="text" id="ticker-input" placeholder="Add ticker (e.g. AAPL)" maxlength="10" />
+                <button id="add-btn" class="btn btn-primary">Add</button>
+            </div>
+            <button id="settings-btn" class="btn btn-secondary" title="Settings">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+                Settings
+            </button>
+            <button id="refresh-btn" class="btn btn-secondary">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+                Refresh
+            </button>
+            <div id="refresh-countdown" class="refresh-countdown hidden"></div>
+        </div>
+    </div>
+</header>
+
+<!-- ── Settings Panel ──────────────────────────────────────────── -->
+<div id="settings-panel" class="settings-panel hidden">
+    <div class="settings-inner">
+        <div class="settings-field">
+            <label for="finnhub-key">
+                Finnhub API Key
+                <a href="https://finnhub.io/register" target="_blank" rel="noopener" class="settings-link">Get free key ↗</a>
+            </label>
+            <p class="settings-hint">Enables analyst ratings &amp; price targets on every card. Free tier, no credit card needed.</p>
+            <div class="settings-input-row">
+                <input type="password" id="finnhub-key" placeholder="Paste your Finnhub API key" autocomplete="off" />
+                <button id="settings-save" class="btn btn-primary">Save</button>
+                <button id="settings-clear" class="btn btn-secondary">Clear</button>
+            </div>
+            <p id="settings-status" class="settings-status"></p>
+        </div>
+    </div>
+</div>
+
+<!-- ── Stats Bar ───────────────────────────────────────────────── -->
+<div class="stats-bar">
+    <div class="stat">
+        <span class="stat-value" id="total-count">—</span>
+        <span class="stat-label">Tracking</span>
+    </div>
+    <div class="stat">
+        <span class="stat-value green" id="near-low-count">—</span>
+        <span class="stat-label">Near 52W Low (&lt;5%)</span>
+    </div>
+    <div class="stat">
+        <span class="stat-value yellow" id="oversold-count">—</span>
+        <span class="stat-label">Oversold (RSI &lt;30)</span>
+    </div>
+    <div class="stat">
+        <span class="stat-value" id="high-score-count">—</span>
+        <span class="stat-label">High Rebound Score</span>
+    </div>
+    <div class="stat">
+        <span class="stat-value muted" id="last-updated">—</span>
+        <span class="stat-label">Last Updated</span>
+    </div>
+</div>
+
+<!-- ── Screener Selector ───────────────────────────────────────── -->
+<div class="screener-bar">
+    <span class="screener-bar-label">Data Source</span>
+    <div class="screener-toggles" id="screener-toggles">
+        <button class="screener-toggle" data-screener="all">
+            <span class="st-icon">🌐</span>
+            <span class="st-label">All</span>
+            <span class="st-desc">Combined screeners</span>
+        </button>
+        <button class="screener-toggle" data-screener="52wk_low">
+            <span class="st-icon">📉</span>
+            <span class="st-label">52W Lows</span>
+            <span class="st-desc">Near 52-week floor</span>
+        </button>
+        <button class="screener-toggle" data-screener="day_losers">
+            <span class="st-icon">🔻</span>
+            <span class="st-label">Day Losers</span>
+            <span class="st-desc">Biggest decliners today</span>
+        </button>
+        <button class="screener-toggle" data-screener="most_actives">
+            <span class="st-icon">⚡</span>
+            <span class="st-label">Most Active</span>
+            <span class="st-desc">Highest trading volume</span>
+        </button>
+        <button class="screener-toggle" data-screener="undervalued_large_caps">
+            <span class="st-icon">💎</span>
+            <span class="st-label">Undervalued</span>
+            <span class="st-desc">Large cap value plays</span>
+        </button>
+        <button class="screener-toggle" data-screener="growth_technology_stocks">
+            <span class="st-icon">🚀</span>
+            <span class="st-label">Growth Tech</span>
+            <span class="st-desc">Tech momentum stocks</span>
+        </button>
+        <button class="screener-toggle" data-screener="aggressive_small_caps">
+            <span class="st-icon">🎯</span>
+            <span class="st-label">Small Caps</span>
+            <span class="st-desc">Aggressive small caps</span>
+        </button>
+    </div>
+</div>
+
+<!-- ── Portfolio Section ───────────────────────────────────────── -->
+<div id="portfolio-section" class="portfolio-section hidden">
+    <div class="portfolio-header">
+        <div class="portfolio-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>
+            </svg>
+            <span>My Portfolio</span>
+        </div>
+        <div id="portfolio-totals" class="portfolio-totals hidden">
+            <span>Invested: <strong id="port-invested">—</strong></span>
+            <span>Value: <strong id="port-value">—</strong></span>
+            <span id="port-pnl" class="port-pnl-val">—</span>
+        </div>
+    </div>
+    <div id="portfolio-rows" class="portfolio-rows"></div>
+</div>
+
+<!-- ── Toolbar ─────────────────────────────────────────────────── -->
+<div class="toolbar">
+    <div class="filters">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="tracked">My Holdings</button>
+        <button class="filter-btn" data-filter="high">High Potential</button>
+        <button class="filter-btn" data-filter="oversold">Oversold RSI</button>
+        <button class="filter-btn" data-filter="near-low">Near 52W Low</button>
+    </div>
+    <div id="screener-status" class="screener-status loading">Fetching screener…</div>
+    <div class="sort-row">
+        <label for="sort-select">Sort by</label>
+        <select id="sort-select">
+            <option value="score">Rebound Score</option>
+            <option value="rsi">RSI (Lowest)</option>
+            <option value="proximity">52W Low Proximity</option>
+            <option value="change">Daily Change</option>
+            <option value="volume">Volume Spike</option>
+        </select>
+    </div>
+</div>
+
+<!-- ── Main Grid ───────────────────────────────────────────────── -->
+<main>
+    <div id="loading" class="loading-state">
+        <div class="spinner"></div>
+        <p>Fetching stock data…</p>
+    </div>
+    <div id="error-banner" class="error-banner hidden">
+        <strong>CORS proxy unavailable.</strong> Some stocks may fail to load. Try refreshing or open via a local server (<code>python3 -m http.server 8000</code>).
+    </div>
+    <div id="stock-grid" class="stock-grid"></div>
+    <div id="empty-state" class="empty-state hidden">
+        <p>No stocks match the current filter.</p>
+    </div>
+</main>
+
+<!-- ── Footer ─────────────────────────────────────────────────── -->
+<footer>
+    <p>Data sourced from Yahoo Finance via CORS proxy · For informational purposes only · Not financial advice</p>
+    <p class="footer-legend">
+        <span class="legend-dot green"></span> High Rebound Score (70+)
+        &nbsp;
+        <span class="legend-dot yellow"></span> Moderate (40–69)
+        &nbsp;
+        <span class="legend-dot red"></span> Low (below 40)
+    </p>
+</footer>
+
+<!-- ── Track Modal ─────────────────────────────────────────────── -->
+<div id="modal-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal">
+        <div class="modal-header">
+            <div>
+                <h2 id="modal-title">Track Purchase</h2>
+                <p id="modal-subtitle" class="modal-subtitle"></p>
+            </div>
+            <button class="modal-close" id="modal-close" aria-label="Close">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="f-buy-price">Buy Price <span class="required">*</span></label>
+                    <div class="input-affixed">
+                        <span class="input-prefix-char">$</span>
+                        <input type="number" id="f-buy-price" step="0.01" min="0.01" placeholder="0.00">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="f-shares">Shares</label>
+                    <input type="number" id="f-shares" step="1" min="1" placeholder="Optional">
+                </div>
+            </div>
+
+            <div class="form-divider">Alert Conditions</div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="f-target-price">Target Price</label>
+                    <div class="input-affixed">
+                        <span class="input-prefix-char">$</span>
+                        <input type="number" id="f-target-price" step="0.01" min="0.01" placeholder="Optional">
+                    </div>
+                    <p class="form-hint">Alert when price hits this value</p>
+                </div>
+                <div class="form-group">
+                    <label for="f-target-pct">% Gain Target</label>
+                    <div class="input-affixed affixed-right">
+                        <input type="number" id="f-target-pct" step="1" min="1" max="1000" placeholder="e.g. 20">
+                        <span class="input-suffix-char">%</span>
+                    </div>
+                    <p class="form-hint">Alert when up X% from buy price</p>
+                </div>
+            </div>
+
+            <div class="form-checks">
+                <label class="check-label">
+                    <input type="checkbox" id="f-alert-rsi">
+                    <div class="check-text">
+                        <strong>RSI Momentum Shift</strong>
+                        <p>Alert when RSI crosses above 50 after previously being oversold (&lt;30)</p>
+                    </div>
+                </label>
+                <label class="check-label">
+                    <input type="checkbox" id="f-alert-52w">
+                    <div class="check-text">
+                        <strong>Approaching 52-Week High</strong>
+                        <p>Alert when price is within 5% of the 52-week high</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-danger hidden" id="modal-remove">Remove Tracking</button>
+            <div class="modal-footer-right">
+                <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
+                <button class="btn btn-primary" id="modal-save">Save Position</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Toast Container ─────────────────────────────────────────── -->
+<div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+
+<script src="main.js"></script>
+</body>
+</html>
