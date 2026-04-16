@@ -266,13 +266,6 @@ async function loadOne(symbol) {
             }
         });
 
-        // Fetch Robinhood popularity independently
-        fetchRhPopularity(symbol).then(pop => {
-            if (stockMap[symbol]?.price) {
-                stockMap[symbol].rhPopularity = pop;
-                updateCardInPlace(symbol);
-            }
-        });
 
         return data;
     } catch (err) {
