@@ -776,6 +776,89 @@ main {
 .breakdown-labels .muted  { color: var(--text-muted); }
 .breakdown-labels .red    { color: var(--red); }
 
+/* ── Insider Section ───────────────────────────────────────────── */
+.insider-section {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    padding: 7px 12px;
+    margin-bottom: 12px;
+    font-size: 11px;
+}
+.insider-icon  { color: var(--text-muted); display: flex; align-items: center; }
+.insider-label { color: var(--text-muted); flex: 1; }
+.insider-count { font-weight: 700; text-decoration: none; }
+.insider-count.active { color: var(--green); }
+.insider-count.none   { color: var(--text-muted); }
+.insider-count:hover  { text-decoration: underline; }
+
+/* ── Fundamentals Section ──────────────────────────────────────── */
+.fundamentals-section {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+.fundamentals-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.fundamentals-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+}
+.fund-item  { display: flex; flex-direction: column; gap: 2px; }
+.fund-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.fund-value { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+
+/* ── Unusual Whales Section ────────────────────────────────────── */
+.uw-section {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+.uw-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-muted);
+    font-weight: 600;
+    margin-bottom: 7px;
+}
+.uw-flow-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    margin-bottom: 5px;
+    flex-wrap: wrap;
+}
+.uw-flow-item:last-child { margin-bottom: 0; }
+.uw-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+.uw-badge.bullish { background: var(--green-dim); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+.uw-badge.bearish { background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(239,68,68,0.3); }
+.uw-badge.neutral { background: var(--accent-dim); color: var(--accent); border: 1px solid rgba(59,130,246,0.3); }
+.uw-type    { color: var(--text-secondary); font-weight: 600; }
+.uw-premium { color: var(--text-primary); font-weight: 600; }
+.uw-expiry  { color: var(--text-muted); margin-left: auto; }
+
 /* ── Card Footer ───────────────────────────────────────────────── */
 .card-footer {
     display: flex;

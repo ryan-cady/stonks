@@ -32,6 +32,21 @@ const PORTFOLIO_KEY = 'rebound-radar-portfolio';
 const FIRED_KEY     = 'rebound-radar-fired';
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
+const AV_KEY_STORE      = 'rebound-radar-av-key';
+const AV_CACHE_KEY      = 'rebound-radar-av-cache';
+const AV_TTL_MS         = 24 * 60 * 60 * 1000;
+const AV_RATE_MS        = 13000; // ~5 req/min (free tier limit is 5/min)
+
+const UW_KEY_STORE      = 'rebound-radar-uw-key';
+const UW_CACHE_KEY      = 'rebound-radar-uw-cache';
+const UW_TTL_MS         = 15 * 60 * 1000;
+
+const FNG_CACHE_KEY     = 'rebound-radar-fng';
+const FNG_TTL_MS        = 60 * 60 * 1000;
+
+const INSIDER_CACHE_KEY = 'rebound-radar-insider';
+const INSIDER_TTL_MS    = 24 * 60 * 60 * 1000;
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let screenerTickers = [];              // fetched fresh on each load
@@ -46,6 +61,12 @@ let currentScreenerId = localStorage.getItem(SCREENER_PREF_KEY) || 'all';
 let finnhubKey        = localStorage.getItem(FINNHUB_KEY) || '';
 let currentFilter     = 'all';
 let currentSort       = 'score';
+let avKey  = localStorage.getItem(AV_KEY_STORE)  || '';
+let uwKey  = localStorage.getItem(UW_KEY_STORE)  || '';
+let cikMap = null; // populated lazily, kept in memory + sessionStorage
+let avQueue      = [];
+let avQueueTimer = null;
+
 let modalSymbol   = null;
 let autoRefreshTimer   = null;
 let countdownTimer     = null;
@@ -105,7 +126,17 @@ function bindUI() {
         if (e.key === 'Enter') saveSettings();
     });
     if (finnhubKey) document.getElementById('finnhub-key').value = finnhubKey;
+    if (avKey)      document.getElementById('av-key').value      = avKey;
+    if (uwKey)      document.getElementById('uw-key').value      = uwKey;
     updateSettingsStatus();
+
+    document.getElementById('av-save').addEventListener('click',  saveAvSettings);
+    document.getElementById('av-clear').addEventListener('click', clearAvSettings);
+    document.getElementById('av-key').addEventListener('keydown', e => { if (e.key === 'Enter') saveAvSettings(); });
+
+    document.getElementById('uw-save').addEventListener('click',  saveUwSettings);
+    document.getElementById('uw-clear').addEventListener('click', clearUwSettings);
+    document.getElementById('uw-key').addEventListener('keydown', e => { if (e.key === 'Enter') saveUwSettings(); });
 
     // Robinhood CSV import
     const rhBtn  = document.getElementById('rh-import-btn');
@@ -224,6 +255,10 @@ async function loadAll(forceRefresh = false) {
 
     if (forceRefresh) stockMap = {};
 
+    // Kick off non-blocking market-level fetches
+    fetchFearGreed().then(updateFngStat);
+    getCikMap(); // pre-warm CIK map for insider lookups
+
     // 1. Fetch fresh screener list
     screenerTickers = await fetchScreenerTickers();
 
@@ -266,6 +301,31 @@ async function loadOne(symbol) {
             }
         });
 
+        // Insider trades from SEC EDGAR (no key needed, free)
+        fetchInsiderData(symbol).then(insider => {
+            if (stockMap[symbol]?.price) {
+                stockMap[symbol].insider = insider;
+                updateCardInPlace(symbol);
+            }
+        });
+
+        // Fundamentals + options flow only for portfolio/custom tickers (API limits)
+        if (customTickers.includes(symbol) || portfolio[symbol]) {
+            fetchFundamentals(symbol).then(fundamentals => {
+                if (stockMap[symbol]?.price) {
+                    stockMap[symbol].fundamentals = fundamentals;
+                    updateCardInPlace(symbol);
+                }
+            });
+            if (uwKey) {
+                fetchUnusualWhales(symbol).then(uwFlow => {
+                    if (stockMap[symbol]?.price) {
+                        stockMap[symbol].uwFlow = uwFlow;
+                        updateCardInPlace(symbol);
+                    }
+                });
+            }
+        }
 
         return data;
     } catch (err) {
@@ -326,6 +386,9 @@ async function fetchStockData(symbol) {
         score, signals, stabilizing,
         analyst: null,      // populated separately by fetchAnalystData
         rhPopularity: null, // populated separately by fetchRhPopularity
+        insider: null,      // populated separately by fetchInsiderData
+        fundamentals: null, // populated separately by fetchFundamentals
+        uwFlow: null,       // populated separately by fetchUnusualWhales
     };
 }
 
@@ -870,6 +933,9 @@ function buildCard(symbol, data) {
 
         ${buildAnalystHTML(data.analyst)}
         ${buildRhPopHTML(data.rhPopularity)}
+        ${buildInsiderHTML(data.insider)}
+        ${buildFundamentalsHTML(data.fundamentals)}
+        ${buildUWFlowHTML(data.uwFlow)}
 
         <div class="card-footer">
             <span class="vol-info">
@@ -1003,6 +1069,269 @@ function buildRhPopHTML(pop) {
     </div>`;
 }
 
+// ── Fear & Greed Index (CNN) ──────────────────────────────────────────────────
+
+function loadFngCache() {
+    try { return JSON.parse(localStorage.getItem(FNG_CACHE_KEY)); } catch (_) { return null; }
+}
+function saveFngCache(data) {
+    try { localStorage.setItem(FNG_CACHE_KEY, JSON.stringify({ data, ts: Date.now() })); } catch (_) {}
+}
+
+async function fetchFearGreed() {
+    const cached = loadFngCache();
+    if (cached && (Date.now() - cached.ts) < FNG_TTL_MS) return cached.data;
+    try {
+        const url = 'https://production.dataviz.cnn.io/index/fearandgreed/graphdata';
+        const resp = await fetch(CORS_PROXY + encodeURIComponent(url), { headers: { 'Accept': 'application/json' } });
+        if (!resp.ok) return null;
+        const json = await resp.json();
+        const score  = json?.fear_and_greed?.score;
+        const rating = json?.fear_and_greed?.rating;
+        if (score == null) return null;
+        const data = { score: Math.round(score), rating: rating || '' };
+        saveFngCache(data);
+        return data;
+    } catch (_) { return null; }
+}
+
+function updateFngStat(fng) {
+    const valEl   = document.getElementById('fng-value');
+    const labelEl = document.getElementById('fng-label');
+    if (!valEl) return;
+    if (!fng) { valEl.textContent = '—'; valEl.className = 'stat-value muted'; return; }
+
+    const { score, rating } = fng;
+    const label = rating.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    valEl.textContent = String(score);
+    if      (score <= 25) valEl.className = 'stat-value green';
+    else if (score <= 44) valEl.className = 'stat-value yellow';
+    else if (score >= 56) valEl.className = 'stat-value red';
+    else                  valEl.className = 'stat-value';
+    if (labelEl && label) labelEl.textContent = label;
+}
+
+// ── SEC EDGAR Insider Trades ──────────────────────────────────────────────────
+
+async function getCikMap() {
+    if (cikMap) return cikMap;
+    const SESSION_KEY = 'rebound-radar-edgar-ciks';
+    try {
+        const s = sessionStorage.getItem(SESSION_KEY);
+        if (s) { cikMap = JSON.parse(s); return cikMap; }
+    } catch (_) {}
+    try {
+        const resp = await fetch('https://www.sec.gov/files/company_tickers.json', {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!resp.ok) { cikMap = {}; return {}; }
+        const json = await resp.json();
+        cikMap = {};
+        for (const entry of Object.values(json)) {
+            cikMap[entry.ticker.toUpperCase()] = String(entry.cik_str).padStart(10, '0');
+        }
+        try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(cikMap)); } catch (_) {}
+        return cikMap;
+    } catch (_) { cikMap = {}; return {}; }
+}
+
+function loadInsiderCache() {
+    try { return JSON.parse(localStorage.getItem(INSIDER_CACHE_KEY) || '{}'); } catch (_) { return {}; }
+}
+function saveInsiderCache(cache) {
+    try { localStorage.setItem(INSIDER_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
+}
+
+async function fetchInsiderData(symbol) {
+    const cache = loadInsiderCache();
+    const cached = cache[symbol];
+    if (cached && (Date.now() - cached.ts) < INSIDER_TTL_MS) return cached.data;
+    try {
+        const map = await getCikMap();
+        const cik = map[symbol];
+        if (!cik) return { notFound: true };
+        const resp = await fetch(`https://data.sec.gov/submissions/CIK${cik}.json`, {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!resp.ok) return { unavailable: true };
+        const json = await resp.json();
+        const forms = json?.filings?.recent?.form || [];
+        const dates = json?.filings?.recent?.filingDate || [];
+        const cutoffMs = Date.now() - 60 * 24 * 60 * 60 * 1000;
+        let count = 0;
+        for (let i = 0; i < forms.length; i++) {
+            if ((forms[i] === '4' || forms[i] === '4/A') && new Date(dates[i]).getTime() >= cutoffMs) count++;
+        }
+        const data = { count, cik: cik.replace(/^0+/, '') };
+        cache[symbol] = { data, ts: Date.now() };
+        saveInsiderCache(cache);
+        return data;
+    } catch (_) { return { unavailable: true }; }
+}
+
+function buildInsiderHTML(insider) {
+    if (!insider || insider.unavailable || insider.notFound) return '';
+    const { count, cik } = insider;
+    const edgarUrl = cik
+        ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${cik}&type=4&dateb=&owner=include&count=10`
+        : '#';
+    const countClass = count > 0 ? 'active' : 'none';
+    const countText  = count > 0
+        ? `${count} filing${count > 1 ? 's' : ''} (60d)`
+        : 'No filings (60d)';
+    return `
+    <div class="insider-section">
+        <span class="insider-icon">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/>
+            </svg>
+        </span>
+        <span class="insider-label">Insider Activity</span>
+        <a class="insider-count ${countClass}" href="${escHtml(edgarUrl)}" target="_blank" rel="noopener">${countText} ↗</a>
+    </div>`;
+}
+
+// ── Alpha Vantage Fundamentals ────────────────────────────────────────────────
+
+function loadAvCache() {
+    try { return JSON.parse(localStorage.getItem(AV_CACHE_KEY) || '{}'); } catch (_) { return {}; }
+}
+function saveAvCache(cache) {
+    try { localStorage.setItem(AV_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
+}
+
+async function fetchFundamentals(symbol) {
+    if (!avKey) return { noKey: true };
+    const cache = loadAvCache();
+    const cached = cache[symbol];
+    if (cached && (Date.now() - cached.ts) < AV_TTL_MS) return cached.data;
+    return new Promise(resolve => {
+        avQueue.push({ symbol, resolve });
+        if (!avQueueTimer) drainAvQueue();
+    });
+}
+
+function drainAvQueue() {
+    if (!avQueue.length) { avQueueTimer = null; return; }
+    const { symbol, resolve } = avQueue.shift();
+    fetchFundamentalsRaw(symbol).then(resolve);
+    avQueueTimer = setTimeout(drainAvQueue, AV_RATE_MS);
+}
+
+async function fetchFundamentalsRaw(symbol) {
+    const cache = loadAvCache();
+    const cached = cache[symbol];
+    if (cached && (Date.now() - cached.ts) < AV_TTL_MS) return cached.data;
+    try {
+        const url = `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${symbol}&apikey=${avKey}`;
+        const resp = await fetch(url);
+        if (!resp.ok) return { unavailable: true };
+        const json = await resp.json();
+        if (json['Note'] || json['Information']) return { rateLimited: true };
+        if (!json.Symbol) return { unavailable: true };
+        const data = {
+            pe:        parseFloat(json.PERatio)      || null,
+            forwardPe: parseFloat(json.ForwardPE)    || null,
+            eps:       parseFloat(json.EPS)          || null,
+            pegRatio:  parseFloat(json.PEGRatio)     || null,
+            divYield:  parseFloat(json.DividendYield)
+                ? (parseFloat(json.DividendYield) * 100).toFixed(2)
+                : null,
+            beta: parseFloat(json.Beta) || null,
+        };
+        cache[symbol] = { data, ts: Date.now() };
+        saveAvCache(cache);
+        return data;
+    } catch (_) { return { unavailable: true }; }
+}
+
+function buildFundamentalsHTML(fund) {
+    if (!fund || fund.noKey || fund.unavailable || fund.rateLimited) return '';
+    const items = [];
+    if (fund.pe        !== null) items.push({ label: 'P/E',       val: fmt1(fund.pe) });
+    if (fund.forwardPe !== null) items.push({ label: 'Fwd P/E',   val: fmt1(fund.forwardPe) });
+    if (fund.eps       !== null) items.push({ label: 'EPS',       val: `$${fmt2(fund.eps)}` });
+    if (fund.beta      !== null) items.push({ label: 'Beta',      val: fmt1(fund.beta) });
+    if (fund.divYield  !== null) items.push({ label: 'Div Yield', val: `${fund.divYield}%` });
+    if (fund.pegRatio  !== null) items.push({ label: 'PEG',       val: fmt1(fund.pegRatio) });
+    if (!items.length) return '';
+    return `
+    <div class="fundamentals-section">
+        <div class="fundamentals-title">Fundamentals</div>
+        <div class="fundamentals-grid">
+            ${items.map(i => `
+            <div class="fund-item">
+                <span class="fund-label">${escHtml(i.label)}</span>
+                <span class="fund-value">${escHtml(i.val)}</span>
+            </div>`).join('')}
+        </div>
+    </div>`;
+}
+
+// ── Unusual Whales Options Flow ───────────────────────────────────────────────
+
+function loadUwCache() {
+    try { return JSON.parse(localStorage.getItem(UW_CACHE_KEY) || '{}'); } catch (_) { return {}; }
+}
+function saveUwCache(cache) {
+    try { localStorage.setItem(UW_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
+}
+
+async function fetchUnusualWhales(symbol) {
+    if (!uwKey) return { noKey: true };
+    const cache = loadUwCache();
+    const cached = cache[symbol];
+    if (cached && (Date.now() - cached.ts) < UW_TTL_MS) return cached.data;
+    try {
+        const url = `https://api.unusualwhales.com/api/stock/${symbol}/flow-alerts`;
+        const resp = await fetch(CORS_PROXY + encodeURIComponent(url), {
+            headers: {
+                'Accept': 'application/json',
+                'Authorization': `Bearer ${uwKey}`,
+            }
+        });
+        if (resp.status === 401) return { unauthorized: true };
+        if (!resp.ok) return { unavailable: true };
+        const json = await resp.json();
+        const alerts = Array.isArray(json?.data) ? json.data : [];
+        const data = {
+            alerts: alerts.slice(0, 5).map(a => ({
+                type:      (a.type || a.option_type || '').toUpperCase(),
+                sentiment: (a.bearish_bullish || a.sentiment || '').toLowerCase(),
+                premium:   a.total_premium || a.premium || 0,
+                expiry:    a.expires || a.expiry || '',
+            }))
+        };
+        cache[symbol] = { data, ts: Date.now() };
+        saveUwCache(cache);
+        return data;
+    } catch (_) { return { unavailable: true }; }
+}
+
+function buildUWFlowHTML(uw) {
+    if (!uw || uw.noKey || uw.unavailable || uw.unauthorized || !uw.alerts?.length) return '';
+    const rows = uw.alerts.map(a => {
+        const isBull = a.sentiment.includes('bull');
+        const isBear = a.sentiment.includes('bear');
+        const cls    = isBull ? 'bullish' : isBear ? 'bearish' : 'neutral';
+        const lbl    = isBull ? 'Bullish' : isBear ? 'Bearish' : 'Neutral';
+        const prem   = a.premium >= 1e6 ? `$${(a.premium / 1e6).toFixed(1)}M`
+                     : a.premium >= 1e3 ? `$${(a.premium / 1e3).toFixed(0)}K`
+                     : a.premium ? `$${a.premium}` : '';
+        return `<div class="uw-flow-item">
+            <span class="uw-badge ${cls}">${lbl}</span>
+            ${a.type ? `<span class="uw-type">${escHtml(a.type)}</span>` : ''}
+            ${prem   ? `<span class="uw-premium">${escHtml(prem)}</span>` : ''}
+            ${a.expiry ? `<span class="uw-expiry">${escHtml(a.expiry)}</span>` : ''}
+        </div>`;
+    }).join('');
+    return `
+    <div class="uw-section">
+        <div class="uw-title">Options Flow · Unusual Whales</div>
+        ${rows}
+    </div>`;
+}
+
 // ── Robinhood CSV Import ──────────────────────────────────────────────────────
 
 function handleRhImport(csvText) {
@@ -1125,6 +1454,48 @@ function updateSettingsStatus() {
     if (!el) return;
     el.textContent = finnhubKey ? '✓ Key saved — analyst data enabled' : 'No key set — analyst data hidden';
     el.className   = `settings-status ${finnhubKey ? 'ok' : ''}`;
+}
+
+function saveAvSettings() {
+    const val = document.getElementById('av-key').value.trim();
+    if (!val) return;
+    avKey = val;
+    localStorage.setItem(AV_KEY_STORE, val);
+    const el = document.getElementById('av-status');
+    if (el) { el.textContent = '✓ Key saved — fundamentals enabled'; el.className = 'settings-status ok'; }
+    document.getElementById('settings-panel').classList.add('hidden');
+    showToast('Alpha Vantage key saved', 'Fundamentals will load for tracked stocks', 'success');
+    loadAll(true);
+}
+
+function clearAvSettings() {
+    avKey = '';
+    localStorage.removeItem(AV_KEY_STORE);
+    document.getElementById('av-key').value = '';
+    const el = document.getElementById('av-status');
+    if (el) { el.textContent = 'No key set — fundamentals hidden'; el.className = 'settings-status'; }
+    showToast('Alpha Vantage key cleared', 'Fundamentals disabled', 'info');
+}
+
+function saveUwSettings() {
+    const val = document.getElementById('uw-key').value.trim();
+    if (!val) return;
+    uwKey = val;
+    localStorage.setItem(UW_KEY_STORE, val);
+    const el = document.getElementById('uw-status');
+    if (el) { el.textContent = '✓ Key saved — options flow enabled'; el.className = 'settings-status ok'; }
+    document.getElementById('settings-panel').classList.add('hidden');
+    showToast('Unusual Whales key saved', 'Options flow will load for tracked stocks', 'success');
+    loadAll(true);
+}
+
+function clearUwSettings() {
+    uwKey = '';
+    localStorage.removeItem(UW_KEY_STORE);
+    document.getElementById('uw-key').value = '';
+    const el = document.getElementById('uw-status');
+    if (el) { el.textContent = 'No key set — options flow hidden'; el.className = 'settings-status'; }
+    showToast('Unusual Whales key cleared', 'Options flow disabled', 'info');
 }
 
 // ── Analyst Display ───────────────────────────────────────────────────────────

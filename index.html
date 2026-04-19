@@ -64,6 +64,38 @@
         <div class="settings-divider"></div>
 
         <div class="settings-field">
+            <label for="av-key">
+                Alpha Vantage API Key
+                <a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener" class="settings-link">Get free key ↗</a>
+            </label>
+            <p class="settings-hint">Enables P/E, EPS, Beta, and other fundamentals on tracked stocks. Free tier: 25 requests/day — data is cached for 24h.</p>
+            <div class="settings-input-row">
+                <input type="password" id="av-key" placeholder="Paste your Alpha Vantage API key" autocomplete="off" />
+                <button id="av-save" class="btn btn-primary">Save</button>
+                <button id="av-clear" class="btn btn-secondary">Clear</button>
+            </div>
+            <p id="av-status" class="settings-status"></p>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-field">
+            <label for="uw-key">
+                Unusual Whales API Key
+                <a href="https://unusualwhales.com/pricing" target="_blank" rel="noopener" class="settings-link">Get key ↗</a>
+            </label>
+            <p class="settings-hint">Enables options flow alerts on tracked stocks — shows unusual bullish/bearish activity. Requires a free or paid Unusual Whales account.</p>
+            <div class="settings-input-row">
+                <input type="password" id="uw-key" placeholder="Paste your Unusual Whales API key" autocomplete="off" />
+                <button id="uw-save" class="btn btn-primary">Save</button>
+                <button id="uw-clear" class="btn btn-secondary">Clear</button>
+            </div>
+            <p id="uw-status" class="settings-status"></p>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-field">
             <label>Import Robinhood Holdings</label>
             <p class="settings-hint">In Robinhood: Account → Statements &amp; History → Export. Import the <strong>stocks CSV</strong> to auto-populate your portfolio with buy prices and share counts.</p>
             <div class="settings-input-row">
@@ -96,6 +128,10 @@
     <div class="stat">
         <span class="stat-value muted" id="last-updated">—</span>
         <span class="stat-label">Last Updated</span>
+    </div>
+    <div class="stat">
+        <span class="stat-value" id="fng-value">—</span>
+        <span class="stat-label" id="fng-label">Fear &amp; Greed</span>
     </div>
 </div>
 
@@ -198,7 +234,7 @@
 
 <!-- ── Footer ─────────────────────────────────────────────────── -->
 <footer>
-    <p>Data sourced from Yahoo Finance via CORS proxy · For informational purposes only · Not financial advice</p>
+    <p>Data: Yahoo Finance · Finnhub · SEC EDGAR (insider trades) · CNN Fear &amp; Greed · Alpha Vantage · Unusual Whales · For informational purposes only · Not financial advice</p>
     <p class="footer-legend">
         <span class="legend-dot green"></span> High Rebound Score (70+)
         &nbsp;
