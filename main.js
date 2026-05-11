@@ -5,6 +5,7 @@
 const CORS_PROXIES = [
     'https://corsproxy.io/?',
     'https://api.allorigins.win/raw?url=',
+    'https://api.codetabs.com/v1/proxy?quest=',
 ];
 
 async function proxyFetch(url, options = {}) {
@@ -12,9 +13,8 @@ async function proxyFetch(url, options = {}) {
     for (const proxy of CORS_PROXIES) {
         try {
             const resp = await fetch(proxy + encodeURIComponent(url), options);
-            // Pass through any response the target actually sent (4xx = caller's problem)
-            // Only retry if the proxy itself errored (5xx)
-            if (resp.ok || resp.status < 500) return resp;
+            // Retry on proxy-level errors (5xx) or rate limiting (429)
+            if (resp.ok || (resp.status < 500 && resp.status !== 429)) return resp;
             lastErr = new Error(`Proxy ${resp.status}`);
         } catch (err) {
             lastErr = err; // network-level failure — try next proxy
