@@ -2,7 +2,26 @@
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const CORS_PROXY = 'https://corsproxy.io/?';
+const CORS_PROXIES = [
+    'https://corsproxy.io/?',
+    'https://api.allorigins.win/raw?url=',
+];
+
+async function proxyFetch(url, options = {}) {
+    let lastErr;
+    for (const proxy of CORS_PROXIES) {
+        try {
+            const resp = await fetch(proxy + encodeURIComponent(url), options);
+            // Pass through any response the target actually sent (4xx = caller's problem)
+            // Only retry if the proxy itself errored (5xx)
+            if (resp.ok || resp.status < 500) return resp;
+            lastErr = new Error(`Proxy ${resp.status}`);
+        } catch (err) {
+            lastErr = err; // network-level failure — try next proxy
+        }
+    }
+    throw lastErr;
+}
 
 // Fallback if screener fetch fails entirely
 const FALLBACK_TICKERS = [
@@ -47,11 +66,39 @@ const FNG_TTL_MS        = 60 * 60 * 1000;
 const INSIDER_CACHE_KEY = 'rebound-radar-insider';
 const INSIDER_TTL_MS    = 24 * 60 * 60 * 1000;
 
+const WSB_CACHE_KEY   = 'rebound-radar-wsb';
+const WSB_TTL_MS      = 30 * 60 * 1000; // 30 min
+
+const STOCK_CACHE_KEY = 'rebound-radar-stock-cache';
+const STOCK_CACHE_TTL = 5 * 60 * 1000;  // 5 min
+
+const WSB_IGNORE = new Set([
+    'A','I','AM','AN','AS','AT','BE','BY','DO','GO','HE','HI','ID','IF','IN',
+    'IS','IT','ME','MY','NO','OF','OH','OK','ON','OR','SO','TO','UP','US','VS','WE',
+    'ALL','AND','ANY','ARE','BUT','CAN','DID','END','FAR','FEW','FOR','GET',
+    'GOT','HAD','HAS','HIM','HIS','HOW','ITS','LET','LOW','MAY','NOT','NOW','OLD',
+    'ONE','OUR','OUT','OWN','SAY','SEE','SHE','THE','TOO','TOP','TWO','USE','VIA',
+    'WAS','WAY','WHO','WHY','YES','YET','YOU','HER','MAN','MEN','OFF',
+    'DD','FD','YOLO','OTM','ITM','ATM','ATH','ATL','FOMO','TLDR','HODL','EDIT',
+    'MODS','APES','WSB','RH','LOL','IMO','TBH','LMAO','AKA',
+    'PUT','PUTS','CALL','CALLS','BULL','BEAR','LONG','SHORT','HOLD','SELL','BUY',
+    'LEAPS','LEAP','GAMMA','DELTA','THETA','VEGA','DTE','EOW','EOM','EOY',
+    'EPS','GDP','CPI','PPI','VIX','ETF','IPO','IRA','NYSE','NASDAQ','SEC',
+    'FOMC','OPEC','FDIC','EBIT','EBITDA','FCF','YOY','QOQ','HF','PE','PEG',
+    'FED','FDA','CDC','WHO','FBI','CIA','DOJ',
+    'EU','UK','USA','UN',
+    'NY','NJ','CA','TX','IL','WA','MA','FL','PA','OH','MI','GA','NC','VA',
+    'AI','EV','AR','VR','ML','OS','UI','UX','API','SDK','CEO','CFO','CTO','COO',
+    'BOD','LLC','LTD','INC','FYI','ASAP','EOD','AM','PM',
+]);
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let screenerTickers = [];              // fetched fresh on each load
 let customTickers   = loadCustomTickers(); // user-added, persisted
 let tickers         = [];              // working set = screener + custom (deduped)
+
+let wsbMentions = {}; // { SYM: { mentions: N, posts: [{title, score}] } }
 
 let stockMap     = {};
 let portfolio    = loadPortfolio();
@@ -120,23 +167,14 @@ function bindUI() {
 
     // Settings panel
     document.getElementById('settings-btn').addEventListener('click', toggleSettings);
-    document.getElementById('settings-save').addEventListener('click', saveSettings);
-    document.getElementById('settings-clear').addEventListener('click', clearSettings);
-    document.getElementById('finnhub-key').addEventListener('keydown', e => {
-        if (e.key === 'Enter') saveSettings();
+    API_KEY_CONFIGS.forEach(cfg => {
+        const active = !!cfg.get();
+        if (active) document.getElementById(cfg.inputId).value = cfg.get();
+        setApiKeyStatus(cfg, active);
+        document.getElementById(cfg.saveId).addEventListener('click',  () => saveApiKey(cfg));
+        document.getElementById(cfg.clearId).addEventListener('click', () => clearApiKey(cfg));
+        document.getElementById(cfg.inputId).addEventListener('keydown', e => { if (e.key === 'Enter') saveApiKey(cfg); });
     });
-    if (finnhubKey) document.getElementById('finnhub-key').value = finnhubKey;
-    if (avKey)      document.getElementById('av-key').value      = avKey;
-    if (uwKey)      document.getElementById('uw-key').value      = uwKey;
-    updateSettingsStatus();
-
-    document.getElementById('av-save').addEventListener('click',  saveAvSettings);
-    document.getElementById('av-clear').addEventListener('click', clearAvSettings);
-    document.getElementById('av-key').addEventListener('keydown', e => { if (e.key === 'Enter') saveAvSettings(); });
-
-    document.getElementById('uw-save').addEventListener('click',  saveUwSettings);
-    document.getElementById('uw-clear').addEventListener('click', clearUwSettings);
-    document.getElementById('uw-key').addEventListener('keydown', e => { if (e.key === 'Enter') saveUwSettings(); });
 
     // Robinhood CSV import
     const rhBtn  = document.getElementById('rh-import-btn');
@@ -158,6 +196,10 @@ function bindUI() {
 
 async function fetchScreenerTickers() {
     setScreenerStatus('loading');
+
+    if (currentScreenerId === 'wsb_radar') {
+        return fetchWsbTickers();
+    }
 
     if (currentScreenerId === 'all') {
         // Fetch all screeners in parallel and merge (deduplicated)
@@ -202,7 +244,7 @@ async function fetchSingleScreener(scrId) {
     try {
         const yahooUrl = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved` +
             `?formatted=false&scrIds=${scrId}&count=${SCREENER_SIZE}&region=US&lang=en-US`;
-        const resp = await fetch(CORS_PROXY + encodeURIComponent(yahooUrl), {
+        const resp = await proxyFetch(yahooUrl, {
             headers: { 'Accept': 'application/json' }
         });
         if (!resp.ok) return [];
@@ -257,7 +299,7 @@ async function loadAll(forceRefresh = false) {
 
     // Kick off non-blocking market-level fetches
     fetchFearGreed().then(updateFngStat);
-    getCikMap(); // pre-warm CIK map for insider lookups
+    if (Object.keys(portfolio).length || customTickers.length) getCikMap(); // only needed for insider lookups
 
     // 1. Fetch fresh screener list
     screenerTickers = await fetchScreenerTickers();
@@ -271,7 +313,7 @@ async function loadAll(forceRefresh = false) {
     updateStats();
 
     // 4. Fetch all stock data in parallel
-    const results = await Promise.allSettled(tickers.map(sym => loadOne(sym)));
+    const results = await Promise.allSettled(tickers.map(sym => loadOne(sym, forceRefresh)));
 
     const allFailed = results.every(r => r.status === 'rejected');
     document.getElementById('error-banner').classList.toggle('hidden', !allFailed || tickers.length === 0);
@@ -280,20 +322,34 @@ async function loadAll(forceRefresh = false) {
     updateStats();
     renderGrid();
     renderPortfolioSection();
+
+    // Batch-save freshly fetched stock data to cache
+    const sc = lsGet(STOCK_CACHE_KEY);
+    for (const [sym, data] of Object.entries(stockMap)) {
+        if (data && data !== 'loading' && !data.error) sc[sym] = { data, ts: Date.now() };
+    }
+    lsSet(STOCK_CACHE_KEY, sc);
 }
 
-async function loadOne(symbol) {
+async function loadOne(symbol, bypassCache = false) {
     stockMap[symbol] = 'loading';
     updateCardInPlace(symbol);
     try {
-        const data = await fetchStockData(symbol);
+        let data;
+        const sc = lsGet(STOCK_CACHE_KEY);
+        const cached = sc[symbol];
+        if (!bypassCache && cached && (Date.now() - cached.ts) < STOCK_CACHE_TTL) {
+            data = cached.data;
+        } else {
+            data = await fetchStockData(symbol);
+        }
+
         stockMap[symbol] = data;
         checkAlerts(data);
         updateStats();
         updateCardInPlace(symbol);
         renderPortfolioSection();
 
-        // Fetch analyst data from Finnhub independently (doesn't block card render)
         fetchAnalystData(symbol).then(analyst => {
             if (stockMap[symbol]?.price) {
                 stockMap[symbol].analyst = analyst;
@@ -301,16 +357,14 @@ async function loadOne(symbol) {
             }
         });
 
-        // Insider trades from SEC EDGAR (no key needed, free)
-        fetchInsiderData(symbol).then(insider => {
-            if (stockMap[symbol]?.price) {
-                stockMap[symbol].insider = insider;
-                updateCardInPlace(symbol);
-            }
-        });
-
-        // Fundamentals + options flow only for portfolio/custom tickers (API limits)
+        // Insider trades + fundamentals + options flow: only for tracked/custom stocks
         if (customTickers.includes(symbol) || portfolio[symbol]) {
+            fetchInsiderData(symbol).then(insider => {
+                if (stockMap[symbol]?.price) {
+                    stockMap[symbol].insider = insider;
+                    updateCardInPlace(symbol);
+                }
+            });
             fetchFundamentals(symbol).then(fundamentals => {
                 if (stockMap[symbol]?.price) {
                     stockMap[symbol].fundamentals = fundamentals;
@@ -337,7 +391,7 @@ async function loadOne(symbol) {
 
 async function fetchStockData(symbol) {
     const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1y&interval=1d&includePrePost=false`;
-    const resp = await fetch(CORS_PROXY + encodeURIComponent(chartUrl), { headers: { 'Accept': 'application/json' } });
+    const resp = await proxyFetch(chartUrl, { headers: { 'Accept': 'application/json' } });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
     const json = await resp.json();
@@ -785,11 +839,12 @@ function renderGrid() {
     grid.innerHTML = entries.map(({ sym, data }) => buildCard(sym, data)).join('');
 
     grid.querySelectorAll('.remove-btn').forEach(b => b.addEventListener('click', () => removeTicker(b.dataset.sym)));
-    grid.querySelectorAll('.retry-btn').forEach(b => b.addEventListener('click', () => loadOne(b.dataset.sym)));
+    grid.querySelectorAll('.retry-btn').forEach(b => b.addEventListener('click', () => loadOne(b.dataset.sym, true)));
     grid.querySelectorAll('.track-btn').forEach(b => b.addEventListener('click', () => openTrackModal(b.dataset.sym)));
 
     const anyLoaded = entries.some(({ data }) => data && data !== 'loading' && !data.error);
     document.getElementById('empty-state').classList.toggle('hidden', anyLoaded || currentFilter === 'all');
+    renderWsbOverview();
 }
 
 function updateCardInPlace(symbol) {
@@ -800,7 +855,7 @@ function updateCardInPlace(symbol) {
     const newCard = wrap.firstElementChild;
     existing.replaceWith(newCard);
     newCard.querySelectorAll('.remove-btn').forEach(b => b.addEventListener('click', () => removeTicker(b.dataset.sym)));
-    newCard.querySelectorAll('.retry-btn').forEach(b => b.addEventListener('click', () => loadOne(b.dataset.sym)));
+    newCard.querySelectorAll('.retry-btn').forEach(b => b.addEventListener('click', () => loadOne(b.dataset.sym, true)));
     newCard.querySelectorAll('.track-btn').forEach(b => b.addEventListener('click', () => openTrackModal(b.dataset.sym)));
     newCard.querySelectorAll('.analyst-key-link').forEach(b => b.addEventListener('click', e => { e.preventDefault(); toggleSettings(); }));
 }
@@ -931,6 +986,7 @@ function buildCard(symbol, data) {
 
         ${badgeHTML ? `<div class="signals">${badgeHTML}</div>` : ''}
 
+        ${buildWsbHTML(symbol)}
         ${buildAnalystHTML(data.analyst)}
         ${buildRhPopHTML(data.rhPopularity)}
         ${buildInsiderHTML(data.insider)}
@@ -955,19 +1011,10 @@ function buildCard(symbol, data) {
 
 // ── Finnhub Analyst Fetch ─────────────────────────────────────────────────────
 
-function loadAnalystCache() {
-    try { return JSON.parse(localStorage.getItem(ANALYST_CACHE_KEY) || '{}'); } catch (_) { return {}; }
-}
-
-function saveAnalystCache(cache) {
-    try { localStorage.setItem(ANALYST_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
-}
-
 async function fetchAnalystData(symbol) {
     if (!finnhubKey) return { noKey: true };
 
-    // Return cached result if it's less than 24 hours old
-    const cache  = loadAnalystCache();
+    const cache  = lsGet(ANALYST_CACHE_KEY);
     const cached = cache[symbol];
     if (cached && (Date.now() - cached.ts) < ANALYST_TTL_MS) {
         return cached.data;
@@ -1004,7 +1051,7 @@ async function fetchAnalystData(symbol) {
 
         const result = { noKey: false, unavailable: false, rating, numAnalysts, breakdown: { sb, b, h, s, ss } };
         cache[symbol] = { data: result, ts: Date.now() };
-        saveAnalystCache(cache);
+        lsSet(ANALYST_CACHE_KEY, cache);
         return result;
     } catch (err) {
         console.warn(`[analyst] Finnhub failed for ${symbol}:`, err);
@@ -1014,21 +1061,14 @@ async function fetchAnalystData(symbol) {
 
 // ── Robinhood Popularity ──────────────────────────────────────────────────────
 
-function loadRhPopCache() {
-    try { return JSON.parse(localStorage.getItem(RH_POP_CACHE_KEY) || '{}'); } catch (_) { return {}; }
-}
-function saveRhPopCache(cache) {
-    try { localStorage.setItem(RH_POP_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
-}
-
 async function fetchRhPopularity(symbol) {
-    const cache  = loadRhPopCache();
+    const cache  = lsGet(RH_POP_CACHE_KEY);
     const cached = cache[symbol];
     if (cached && (Date.now() - cached.ts) < RH_POP_TTL_MS) return cached.data;
 
     try {
         const instrUrl  = `https://api.robinhood.com/instruments/?symbol=${encodeURIComponent(symbol)}`;
-        const instrResp = await fetch(CORS_PROXY + encodeURIComponent(instrUrl), {
+        const instrResp = await proxyFetch(instrUrl, {
             headers: { 'Accept': 'application/json' }
         });
         if (!instrResp.ok) return null;
@@ -1037,7 +1077,7 @@ async function fetchRhPopularity(symbol) {
         if (!id) return null;
 
         const popUrl  = `https://api.robinhood.com/popularity/?ids=${id}`;
-        const popResp = await fetch(CORS_PROXY + encodeURIComponent(popUrl), {
+        const popResp = await proxyFetch(popUrl, {
             headers: { 'Accept': 'application/json' }
         });
         if (!popResp.ok) return null;
@@ -1047,7 +1087,7 @@ async function fetchRhPopularity(symbol) {
 
         const result = { holders };
         cache[symbol] = { data: result, ts: Date.now() };
-        saveRhPopCache(cache);
+        lsSet(RH_POP_CACHE_KEY, cache);
         return result;
     } catch (_) {
         return null;
@@ -1071,26 +1111,19 @@ function buildRhPopHTML(pop) {
 
 // ── Fear & Greed Index (CNN) ──────────────────────────────────────────────────
 
-function loadFngCache() {
-    try { return JSON.parse(localStorage.getItem(FNG_CACHE_KEY)); } catch (_) { return null; }
-}
-function saveFngCache(data) {
-    try { localStorage.setItem(FNG_CACHE_KEY, JSON.stringify({ data, ts: Date.now() })); } catch (_) {}
-}
-
 async function fetchFearGreed() {
-    const cached = loadFngCache();
+    const cached = lsGet(FNG_CACHE_KEY, null);
     if (cached && (Date.now() - cached.ts) < FNG_TTL_MS) return cached.data;
     try {
         const url = 'https://production.dataviz.cnn.io/index/fearandgreed/graphdata';
-        const resp = await fetch(CORS_PROXY + encodeURIComponent(url), { headers: { 'Accept': 'application/json' } });
+        const resp = await proxyFetch(url, { headers: { 'Accept': 'application/json' } });
         if (!resp.ok) return null;
         const json = await resp.json();
         const score  = json?.fear_and_greed?.score;
         const rating = json?.fear_and_greed?.rating;
         if (score == null) return null;
         const data = { score: Math.round(score), rating: rating || '' };
-        saveFngCache(data);
+        lsSet(FNG_CACHE_KEY, { data, ts: Date.now() });
         return data;
     } catch (_) { return null; }
 }
@@ -1135,15 +1168,8 @@ async function getCikMap() {
     } catch (_) { cikMap = {}; return {}; }
 }
 
-function loadInsiderCache() {
-    try { return JSON.parse(localStorage.getItem(INSIDER_CACHE_KEY) || '{}'); } catch (_) { return {}; }
-}
-function saveInsiderCache(cache) {
-    try { localStorage.setItem(INSIDER_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
-}
-
 async function fetchInsiderData(symbol) {
-    const cache = loadInsiderCache();
+    const cache = lsGet(INSIDER_CACHE_KEY);
     const cached = cache[symbol];
     if (cached && (Date.now() - cached.ts) < INSIDER_TTL_MS) return cached.data;
     try {
@@ -1164,7 +1190,7 @@ async function fetchInsiderData(symbol) {
         }
         const data = { count, cik: cik.replace(/^0+/, '') };
         cache[symbol] = { data, ts: Date.now() };
-        saveInsiderCache(cache);
+        lsSet(INSIDER_CACHE_KEY, cache);
         return data;
     } catch (_) { return { unavailable: true }; }
 }
@@ -1193,16 +1219,9 @@ function buildInsiderHTML(insider) {
 
 // ── Alpha Vantage Fundamentals ────────────────────────────────────────────────
 
-function loadAvCache() {
-    try { return JSON.parse(localStorage.getItem(AV_CACHE_KEY) || '{}'); } catch (_) { return {}; }
-}
-function saveAvCache(cache) {
-    try { localStorage.setItem(AV_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
-}
-
 async function fetchFundamentals(symbol) {
     if (!avKey) return { noKey: true };
-    const cache = loadAvCache();
+    const cache = lsGet(AV_CACHE_KEY);
     const cached = cache[symbol];
     if (cached && (Date.now() - cached.ts) < AV_TTL_MS) return cached.data;
     return new Promise(resolve => {
@@ -1219,7 +1238,7 @@ function drainAvQueue() {
 }
 
 async function fetchFundamentalsRaw(symbol) {
-    const cache = loadAvCache();
+    const cache = lsGet(AV_CACHE_KEY);
     const cached = cache[symbol];
     if (cached && (Date.now() - cached.ts) < AV_TTL_MS) return cached.data;
     try {
@@ -1240,7 +1259,7 @@ async function fetchFundamentalsRaw(symbol) {
             beta: parseFloat(json.Beta) || null,
         };
         cache[symbol] = { data, ts: Date.now() };
-        saveAvCache(cache);
+        lsSet(AV_CACHE_KEY, cache);
         return data;
     } catch (_) { return { unavailable: true }; }
 }
@@ -1270,21 +1289,14 @@ function buildFundamentalsHTML(fund) {
 
 // ── Unusual Whales Options Flow ───────────────────────────────────────────────
 
-function loadUwCache() {
-    try { return JSON.parse(localStorage.getItem(UW_CACHE_KEY) || '{}'); } catch (_) { return {}; }
-}
-function saveUwCache(cache) {
-    try { localStorage.setItem(UW_CACHE_KEY, JSON.stringify(cache)); } catch (_) {}
-}
-
 async function fetchUnusualWhales(symbol) {
     if (!uwKey) return { noKey: true };
-    const cache = loadUwCache();
+    const cache = lsGet(UW_CACHE_KEY);
     const cached = cache[symbol];
     if (cached && (Date.now() - cached.ts) < UW_TTL_MS) return cached.data;
     try {
         const url = `https://api.unusualwhales.com/api/stock/${symbol}/flow-alerts`;
-        const resp = await fetch(CORS_PROXY + encodeURIComponent(url), {
+        const resp = await proxyFetch(url, {
             headers: {
                 'Accept': 'application/json',
                 'Authorization': `Bearer ${uwKey}`,
@@ -1303,7 +1315,7 @@ async function fetchUnusualWhales(symbol) {
             }))
         };
         cache[symbol] = { data, ts: Date.now() };
-        saveUwCache(cache);
+        lsSet(UW_CACHE_KEY, cache);
         return data;
     } catch (_) { return { unavailable: true }; }
 }
@@ -1430,72 +1442,54 @@ function toggleSettings() {
     document.getElementById('settings-panel').classList.toggle('hidden');
 }
 
-function saveSettings() {
-    const val = document.getElementById('finnhub-key').value.trim();
+const API_KEY_CONFIGS = [
+    { inputId: 'finnhub-key', saveId: 'settings-save', clearId: 'settings-clear', statusId: 'settings-status',
+      lsKey: FINNHUB_KEY, get: () => finnhubKey, set: v => { finnhubKey = v; },
+      savedMsg:   ['API key saved',            'Analyst data will load on next refresh'],
+      clearedMsg: ['API key cleared',           'Analyst data disabled'],
+      savedText:  '✓ Key saved — analyst data enabled',
+      clearedText:'No key set — analyst data hidden',
+    },
+    { inputId: 'av-key', saveId: 'av-save', clearId: 'av-clear', statusId: 'av-status',
+      lsKey: AV_KEY_STORE, get: () => avKey, set: v => { avKey = v; },
+      savedMsg:   ['Alpha Vantage key saved',  'Fundamentals will load for tracked stocks'],
+      clearedMsg: ['Alpha Vantage key cleared', 'Fundamentals disabled'],
+      savedText:  '✓ Key saved — fundamentals enabled',
+      clearedText:'No key set — fundamentals hidden',
+    },
+    { inputId: 'uw-key', saveId: 'uw-save', clearId: 'uw-clear', statusId: 'uw-status',
+      lsKey: UW_KEY_STORE, get: () => uwKey, set: v => { uwKey = v; },
+      savedMsg:   ['Unusual Whales key saved',  'Options flow will load for tracked stocks'],
+      clearedMsg: ['Unusual Whales key cleared', 'Options flow disabled'],
+      savedText:  '✓ Key saved — options flow enabled',
+      clearedText:'No key set — options flow hidden',
+    },
+];
+
+function saveApiKey(cfg) {
+    const val = document.getElementById(cfg.inputId).value.trim();
     if (!val) return;
-    finnhubKey = val;
-    localStorage.setItem(FINNHUB_KEY, val);
-    updateSettingsStatus();
+    cfg.set(val);
+    localStorage.setItem(cfg.lsKey, val);
+    setApiKeyStatus(cfg, true);
     document.getElementById('settings-panel').classList.add('hidden');
-    showToast('API key saved', 'Analyst data will load on next refresh', 'success');
+    showToast(...cfg.savedMsg, 'success');
     loadAll(true);
 }
 
-function clearSettings() {
-    finnhubKey = '';
-    localStorage.removeItem(FINNHUB_KEY);
-    document.getElementById('finnhub-key').value = '';
-    updateSettingsStatus();
-    showToast('API key cleared', 'Analyst data disabled', 'info');
+function clearApiKey(cfg) {
+    cfg.set('');
+    localStorage.removeItem(cfg.lsKey);
+    document.getElementById(cfg.inputId).value = '';
+    setApiKeyStatus(cfg, false);
+    showToast(...cfg.clearedMsg, 'info');
 }
 
-function updateSettingsStatus() {
-    const el = document.getElementById('settings-status');
+function setApiKeyStatus(cfg, active) {
+    const el = document.getElementById(cfg.statusId);
     if (!el) return;
-    el.textContent = finnhubKey ? '✓ Key saved — analyst data enabled' : 'No key set — analyst data hidden';
-    el.className   = `settings-status ${finnhubKey ? 'ok' : ''}`;
-}
-
-function saveAvSettings() {
-    const val = document.getElementById('av-key').value.trim();
-    if (!val) return;
-    avKey = val;
-    localStorage.setItem(AV_KEY_STORE, val);
-    const el = document.getElementById('av-status');
-    if (el) { el.textContent = '✓ Key saved — fundamentals enabled'; el.className = 'settings-status ok'; }
-    document.getElementById('settings-panel').classList.add('hidden');
-    showToast('Alpha Vantage key saved', 'Fundamentals will load for tracked stocks', 'success');
-    loadAll(true);
-}
-
-function clearAvSettings() {
-    avKey = '';
-    localStorage.removeItem(AV_KEY_STORE);
-    document.getElementById('av-key').value = '';
-    const el = document.getElementById('av-status');
-    if (el) { el.textContent = 'No key set — fundamentals hidden'; el.className = 'settings-status'; }
-    showToast('Alpha Vantage key cleared', 'Fundamentals disabled', 'info');
-}
-
-function saveUwSettings() {
-    const val = document.getElementById('uw-key').value.trim();
-    if (!val) return;
-    uwKey = val;
-    localStorage.setItem(UW_KEY_STORE, val);
-    const el = document.getElementById('uw-status');
-    if (el) { el.textContent = '✓ Key saved — options flow enabled'; el.className = 'settings-status ok'; }
-    document.getElementById('settings-panel').classList.add('hidden');
-    showToast('Unusual Whales key saved', 'Options flow will load for tracked stocks', 'success');
-    loadAll(true);
-}
-
-function clearUwSettings() {
-    uwKey = '';
-    localStorage.removeItem(UW_KEY_STORE);
-    document.getElementById('uw-key').value = '';
-    const el = document.getElementById('uw-status');
-    if (el) { el.textContent = 'No key set — options flow hidden'; el.className = 'settings-status'; }
-    showToast('Unusual Whales key cleared', 'Options flow disabled', 'info');
+    el.textContent = active ? cfg.savedText : cfg.clearedText;
+    el.className   = `settings-status${active ? ' ok' : ''}`;
 }
 
 // ── Analyst Display ───────────────────────────────────────────────────────────
@@ -1624,40 +1618,195 @@ function removeTicker(symbol) {
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
-function loadCustomTickers() {
+function loadCustomTickers() { return lsGet(CUSTOM_KEY, []); }
+function saveCustomTickers()  { lsSet(CUSTOM_KEY, customTickers); }
+function loadPortfolio()      { return lsGet(PORTFOLIO_KEY); }
+function savePortfolio()      { lsSet(PORTFOLIO_KEY, portfolio); }
+function loadFiredAlerts()    { return new Set(lsGet(FIRED_KEY, [])); }
+function saveFiredAlerts()    { lsSet(FIRED_KEY, [...firedAlerts].slice(-500)); }
+
+// ── WSB Radar ─────────────────────────────────────────────────────────────────
+
+async function fetchWsbTickers() {
+    const cached = lsGet(WSB_CACHE_KEY, null);
+    if (cached && (Date.now() - cached.ts) < WSB_TTL_MS) {
+        wsbMentions = cached.mentions;
+        const syms = Object.keys(wsbMentions);
+        setScreenerStatus('ok', 'WSB Radar', syms.length);
+        return syms;
+    }
+
     try {
-        const s = localStorage.getItem(CUSTOM_KEY);
-        return s ? JSON.parse(s) : [];
-    } catch (_) { return []; }
+        const url = 'https://www.reddit.com/r/wallstreetbets/hot.json?limit=100';
+        const resp = await proxyFetch(url, {
+            headers: { 'Accept': 'application/json' }
+        });
+        if (!resp.ok) throw new Error(`Reddit ${resp.status}`);
+        const json = await resp.json();
+        const posts = json?.data?.children || [];
+
+        const counts  = {};
+        const postMap = {};
+
+        for (const { data: p } of posts) {
+            const text = (p.title || '') + ' ' + (p.selftext || '').slice(0, 300);
+            for (const sym of extractWsbTickers(text)) {
+                counts[sym] = (counts[sym] || 0) + 1;
+                if (!postMap[sym]) postMap[sym] = [];
+                if (postMap[sym].length < 3) postMap[sym].push({ title: p.title, score: p.score || 0 });
+            }
+        }
+
+        const sorted = Object.entries(counts)
+            .filter(([, n]) => n >= 2)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, 25);
+
+        wsbMentions = {};
+        for (const [sym, mentions] of sorted) {
+            wsbMentions[sym] = { mentions, posts: postMap[sym] || [] };
+        }
+
+        const syms = Object.keys(wsbMentions);
+        setScreenerStatus('ok', 'WSB Radar', syms.length);
+        lsSet(WSB_CACHE_KEY, { mentions: wsbMentions, ts: Date.now() });
+        return syms;
+    } catch (err) {
+        console.warn('[wsb] fetch failed:', err);
+        wsbMentions = {};
+        setScreenerStatus('fallback');
+        return [...FALLBACK_TICKERS];
+    }
 }
 
-function saveCustomTickers() {
-    try { localStorage.setItem(CUSTOM_KEY, JSON.stringify(customTickers)); } catch (_) {}
+function extractWsbTickers(text) {
+    const found = new Set();
+    // $TICKER format — high confidence
+    for (const m of (text.match(/\$([A-Z]{1,5})\b/g) || [])) {
+        const sym = m.slice(1);
+        if (!WSB_IGNORE.has(sym)) found.add(sym);
+    }
+    // Standalone ALLCAPS 2-5 char words — secondary signal
+    for (const sym of (text.match(/\b([A-Z]{2,5})\b/g) || [])) {
+        if (!WSB_IGNORE.has(sym)) found.add(sym);
+    }
+    return [...found];
 }
 
-function loadPortfolio() {
-    try {
-        const s = localStorage.getItem(PORTFOLIO_KEY);
-        return s ? JSON.parse(s) : {};
-    } catch (_) { return {}; }
+function getWsbSignal(data) {
+    const { rsi, pctFromLow, distFromLow } = data;
+    if (rsi < 40 && pctFromLow < 20)
+        return { label: 'BUY WATCH',     cls: 'wsb-buy',     tip: 'Oversold + near lows — possible entry' };
+    if (rsi > 65 && distFromLow > 0.75)
+        return { label: 'TAKE PROFITS',  cls: 'wsb-sell',    tip: 'Overbought + near 52W high — hype may be peaking' };
+    if (pctFromLow < 30)
+        return { label: 'WATCH',         cls: 'wsb-watch',   tip: 'Near lows — entry forming' };
+    return         { label: 'TRENDING',  cls: 'wsb-neutral', tip: 'Mid-range — monitor for pullback' };
 }
 
-function savePortfolio() {
-    try { localStorage.setItem(PORTFOLIO_KEY, JSON.stringify(portfolio)); } catch (_) {}
+function buildWsbHTML(symbol) {
+    if (currentScreenerId !== 'wsb_radar') return '';
+    const wsb = wsbMentions[symbol];
+    if (!wsb) return '';
+    const data = stockMap[symbol];
+    if (!data || data === 'loading' || data.error) return '';
+
+    const sig     = getWsbSignal(data);
+    const topPost = wsb.posts[0];
+    const preview = topPost
+        ? topPost.title.length > 80 ? topPost.title.slice(0, 80) + '…' : topPost.title
+        : null;
+
+    return `
+    <div class="wsb-section">
+        <div class="wsb-header">
+            <span class="wsb-icon">🦍</span>
+            <span class="wsb-label">r/wallstreetbets</span>
+            <span class="wsb-mentions">${wsb.mentions} mention${wsb.mentions !== 1 ? 's' : ''}</span>
+            <span class="wsb-signal ${sig.cls}" title="${escHtml(sig.tip)}">${escHtml(sig.label)}</span>
+        </div>
+        ${preview ? `<p class="wsb-post-title">"${escHtml(preview)}"</p>` : ''}
+    </div>`;
 }
 
-function loadFiredAlerts() {
-    try {
-        const s = localStorage.getItem(FIRED_KEY);
-        return new Set(s ? JSON.parse(s) : []);
-    } catch (_) { return new Set(); }
+function renderWsbOverview() {
+    const el = document.getElementById('wsb-overview');
+    if (!el) return;
+
+    if (currentScreenerId !== 'wsb_radar') {
+        el.classList.add('hidden');
+        return;
+    }
+    el.classList.remove('hidden');
+
+    const entries = Object.entries(wsbMentions).map(([sym, wsb]) => {
+        const data = stockMap[sym];
+        if (!data || data === 'loading' || data.error) return null;
+        return { sym, wsb, data, sig: getWsbSignal(data) };
+    }).filter(Boolean);
+
+    const allLoaded = Object.keys(wsbMentions).length > 0 &&
+        Object.keys(wsbMentions).every(sym => stockMap[sym] && stockMap[sym] !== 'loading');
+
+    const byLabel = label => entries
+        .filter(e => e.sig.label === label)
+        .sort((a, b) => b.wsb.mentions - a.wsb.mentions);
+
+    const buyWatch    = byLabel('BUY WATCH');
+    const takeProfits = byLabel('TAKE PROFITS');
+    const watching    = byLabel('WATCH');
+
+    const renderRow = ({ sym, wsb, data }) =>
+        `<div class="wsb-ov-row">
+            <a class="wsb-ov-sym" href="https://robinhood.com/stocks/${escHtml(sym)}" target="_blank" rel="noopener">${escHtml(sym)}</a>
+            <span class="wsb-ov-price">$${fmt2(data.price)}</span>
+            <span class="wsb-ov-stat">RSI ${fmt1(data.rsi)}</span>
+            <span class="wsb-ov-stat">${fmt1(data.pctFromLow)}% from low</span>
+            <span class="wsb-ov-badge">${wsb.mentions}×</span>
+        </div>`;
+
+    const renderGroup = (title, cls, rows) => rows.length === 0 ? '' : `
+        <div class="wsb-ov-group">
+            <div class="wsb-ov-group-title ${cls}">${title}</div>
+            ${rows.map(renderRow).join('')}
+        </div>`;
+
+    const cacheAge = (() => {
+        const c = lsGet(WSB_CACHE_KEY, null);
+        if (!c) return '';
+        const mins = Math.round((Date.now() - c.ts) / 60000);
+        return `· updated ${mins}m ago`;
+    })();
+
+    el.innerHTML = `
+    <div class="wsb-ov-inner">
+        <div class="wsb-ov-header">
+            <span class="wsb-ov-title">🦍 WSB Radar</span>
+            <span class="wsb-ov-meta">r/wallstreetbets · ${Object.keys(wsbMentions).length} tickers found ${cacheAge}</span>
+        </div>
+        ${!allLoaded && entries.length === 0
+            ? '<p class="wsb-ov-loading">Scanning posts and loading price data…</p>'
+            : ''}
+        <div class="wsb-ov-columns">
+            ${renderGroup('🟢 Buy Watch — oversold + WSB buzz', 'wsb-buy', buyWatch)}
+            ${renderGroup('🔴 Take Profits — overbought near highs', 'wsb-sell', takeProfits)}
+            ${renderGroup('👁 Watch — near lows, building buzz', 'wsb-watch', watching)}
+        </div>
+        ${allLoaded && buyWatch.length + takeProfits.length + watching.length === 0
+            ? '<p class="wsb-ov-none">All tracked WSB stocks are mid-range — no strong signals yet. Check RSI and 52W position on individual cards.</p>'
+            : ''}
+        <p class="wsb-ov-disclaimer">Not financial advice. WSB sentiment is highly speculative and can be extremely volatile.</p>
+    </div>`;
 }
 
-function saveFiredAlerts() {
-    try { localStorage.setItem(FIRED_KEY, JSON.stringify([...firedAlerts].slice(-500))); } catch (_) {}
-}
+// ── Formatting & Storage Utilities ───────────────────────────────────────────
 
-// ── Formatting ────────────────────────────────────────────────────────────────
+function lsGet(key, fallback = {}) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; }
+}
+function lsSet(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch (_) {}
+}
 
 function fmt2(n) { return Number(n).toFixed(2); }
 function fmt1(n) { return Number(n).toFixed(1); }
